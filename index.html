@@ -28,6 +28,12 @@
   .chip{flex-shrink:0; padding:7px 15px; border-radius:16px; font-size:13px; font-weight:600;
     border:1px solid var(--line); background:transparent; color:var(--sub); white-space:nowrap}
   .chip.on{background:var(--accent); color:#10202a; border-color:var(--accent)}
+  .selfield{margin:6px 0}
+  .selfield-label{font-size:12px; color:var(--sub); margin-bottom:4px}
+  .selfield-chips{display:flex; flex-wrap:wrap; gap:6px}
+  .selchip{padding:6px 12px; border-radius:14px; font-size:13px; border:1px solid var(--line); background:transparent; color:var(--sub); cursor:pointer}
+  .selchip.on{background:var(--accent); color:#10202a; border-color:var(--accent)}
+  .selchip.all{border-style:dashed}
   .card{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; margin-bottom:14px}
 
   /* home */
@@ -157,8 +163,8 @@ const FOCUS_INTERVAL = {1:0,2:1,3:1,4:2,5:3};
 const MAX_BOX = 5;
 function impFactor(imp){ return imp>=3?0.5 : imp===2?0.75 : 1.0; }
 
-// phase: "new"(未学習) / "night_done"(前夜暗記済→朝待ち) / "review"(箱で抜き打ち)
-// applyMorning: 朝テスト(通常)または個別テストの正誤で箱を更新
+// phase: "new"(未学習) / "studied"(input済みだが未テスト) / "review"(テスト済みでLeitner間隔待ち)
+// applyReview: output(テスト)の正誤で箱を更新。通常は最大8日、個別は最大3日間隔。
 function applyReview(c, trackId, correct, slot){
   const today = todayStr();
   const p = prog(c, trackId);
@@ -179,7 +185,7 @@ function applyReview(c, trackId, correct, slot){
   }
 }
 
-function markNightDone(c, trackId){ prog(c, trackId).phase = "night_done"; }
+function markStudied(c, trackId){ const p=prog(c,trackId); if(p.phase==="new") p.phase="studied"; }
 
 // effective priority（選抜順・出題順）
 function eprio(c, trackId){
@@ -191,33 +197,33 @@ function eprio(c, trackId){
   return imp*0.4 + boxScore*0.3 + wrong*0.3;
 }
 
-// 通常トラック：夜の対象 phase="new" を重要度優先で日次上限まで
-function nightTargets(trackId){
+// input(暗記)対象: まだ習得が浅い＝new(未学習) と、dueが来たカード。日次上限で絞る。
+function inputTargets(trackId){
+  const today = todayStr();
   const t = getTrack(trackId);
-  const limit = (t && t.dailyLimit) || 25;
-  const pool = cardsInTrack(trackId).filter(c=>prog(c,trackId).phase==="new");
+  const limit = (t && t.dailyLimit) || 9999;
+  const pool = cardsInTrack(trackId).filter(c=>{
+    const p=prog(c,trackId);
+    return p.phase!=="review" || p.dueDate<=today;  // new/studied は常に、reviewはdueが来たら
+  });
   pool.sort((a,b)=> (b.importance-a.importance) || (eprio(b,trackId)-eprio(a,trackId)));
   return pool.slice(0, limit);
 }
-// 通常トラック：朝の対象 night_done ＋ review&due
-function morningTargets(trackId){
+// output(テスト)対象: dueが来たカード全部（未学習も含めテスト可能）。日次上限で絞る。
+function outputTargets(trackId){
   const today = todayStr();
-  const night = cardsInTrack(trackId).filter(c=>prog(c,trackId).phase==="night_done");
-  const ambush = cardsInTrack(trackId).filter(c=>{ const p=prog(c,trackId); return p.phase==="review" && p.dueDate<=today; });
-  const all = night.concat(ambush);
-  all.sort((a,b)=> eprio(b,trackId)-eprio(a,trackId));
-  return all;
-}
-// 個別トラック：いつでも回せる。今日出す分 = new(未学習) ＋ due が来た review
-function focusTargets(trackId){
-  const today = todayStr();
+  const t = getTrack(trackId);
+  const limit = (t && t.dailyLimit) || 9999;
   const pool = cardsInTrack(trackId).filter(c=>{
     const p=prog(c,trackId);
-    return p.phase==="new" || p.phase==="night_done" || (p.phase==="review" && p.dueDate<=today);
+    return p.phase==="new" || p.phase==="studied" || (p.phase==="review" && p.dueDate<=today);
   });
   pool.sort((a,b)=> eprio(b,trackId)-eprio(a,trackId));
-  const t=getTrack(trackId); const limit=(t&&t.dailyLimit)||9999;
   return pool.slice(0, limit);
+}
+// 全カード（先取り用）
+function allTargets(trackId){
+  return cardsInTrack(trackId).slice().sort((a,b)=>eprio(b,trackId)-eprio(a,trackId));
 }
 
 // ============ math render ============
@@ -307,7 +313,7 @@ function render(){
   const d = document.createElement("div"); d.className="date"; d.textContent=todayStr(); app.appendChild(d);
 
   const tabs = document.createElement("div"); tabs.className="tabs";
-  [["home","今日"],["dash","進捗"],["manage","管理"]].forEach(([id,label])=>{
+  [["home","ホーム"],["dash","進捗"],["manage","管理"]].forEach(([id,label])=>{
     const b=document.createElement("button"); b.textContent=label; if(view.tab===id)b.className="on";
     b.onclick=()=>{view.tab=id; render();}; tabs.appendChild(b);
   });
@@ -324,77 +330,64 @@ function renderHome(){
     e.textContent="まだカードがありません。「管理」タブから、担当チャットが作ったカードJSONをインポートしてください。";
     app.appendChild(e); return;
   }
-  // トラック選択（通常＋個別）
+  // トラック選択（通常＋個別。全トラック対等）
   if(!getTrack(view.activeTrack)) view.activeTrack="normal";
   const trackBar=document.createElement("div"); trackBar.className="chipbar";
   for(const t of state.tracks){
     const n = cardsInTrack(t.id).length;
     if(t.id!=="normal" && n===0) continue; // 空の個別トラックは隠す
     const chip=document.createElement("button"); chip.className="chip"+(view.activeTrack===t.id?" on":"");
-    chip.textContent = t.id==="normal" ? t.name : `${t.name}`;
+    chip.textContent = t.name;
     chip.onclick=()=>{ view.activeTrack=t.id; render(); };
     trackBar.appendChild(chip);
   }
   app.appendChild(trackBar);
 
   const trackId = view.activeTrack;
-  const isNormal = trackId==="normal";
   const c=document.createElement("div"); c.className="card";
 
-  if(isNormal){
-    // 夜朝サイクル
-    const night = nightTargets(trackId);
-    const morning = morningTargets(trackId);
-    const seg=document.createElement("div"); seg.className="seg";
-    const nb=document.createElement("button"); nb.textContent="夜（暗記）";
-    const mb=document.createElement("button"); mb.textContent="朝（テスト）";
-    const setSlot=s=>{view.slot=s; nb.className=s==="night"?"on":""; mb.className=s==="morning"?"on":""; drawCount();};
-    nb.onclick=()=>setSlot("night"); mb.onclick=()=>setSlot("morning");
-    const hour=new Date().getHours(); if(!view.slot) view.slot=(hour>=4&&hour<12)?"morning":"night";
-    c.appendChild(seg); seg.appendChild(nb); seg.appendChild(mb);
-    const bigWrap=document.createElement("div"); c.appendChild(bigWrap);
-    function drawCount(){
-      bigWrap.innerHTML="";
-      const n = view.slot==="night" ? night.length : morning.length;
-      const big=document.createElement("div"); big.className="big"; big.textContent=n; bigWrap.appendChild(big);
-      const lbl=document.createElement("div"); lbl.className="biglabel";
-      lbl.textContent = view.slot==="night"
-        ? (n? "枚を今夜覚えます" : "今夜の暗記対象はありません")
-        : (n? "枚が朝のテスト対象です" : "朝のテスト対象はありません");
-      bigWrap.appendChild(lbl);
-      if(view.slot==="night" && n>0){
-        const b=document.createElement("button"); b.className="btn"; b.textContent="暗記を始める";
-        b.onclick=()=>startSession("study", night, trackId); bigWrap.appendChild(b);
-      }
-      if(view.slot==="morning" && n>0){
-        const b=document.createElement("button"); b.className="btn"; b.textContent="朝のテストを始める";
-        b.onclick=()=>startSession("test", morning, trackId); bigWrap.appendChild(b);
-      }
-    }
-    setSlot(view.slot);
-  }else{
-    // 個別トラック：いつでも回せる
-    const targets = focusTargets(trackId);
-    const allCards = cardsInTrack(trackId).slice().sort((a,b)=>eprio(b,trackId)-eprio(a,trackId));
-    const big=document.createElement("div"); big.className="big"; big.textContent=targets.length; c.appendChild(big);
+  // input / output 選択（全トラック共通）
+  const inTargets = inputTargets(trackId);
+  const outTargets = outputTargets(trackId);
+  const allCards = allTargets(trackId);
+  const seg=document.createElement("div"); seg.className="seg";
+  const ib=document.createElement("button"); ib.textContent="input";
+  const ob=document.createElement("button"); ob.textContent="output";
+  if(!view.mode2) view.mode2="input";
+  const bigWrap=document.createElement("div");
+  const setMode=m=>{ view.mode2=m; ib.className=m==="input"?"on":""; ob.className=m==="output"?"on":""; draw(); };
+  ib.onclick=()=>setMode("input"); ob.onclick=()=>setMode("output");
+  c.appendChild(seg); seg.appendChild(ib); seg.appendChild(ob);
+  c.appendChild(bigWrap);
+
+  function draw(){
+    bigWrap.innerHTML="";
+    const isInput = view.mode2==="input";
+    const targets = isInput ? inTargets : outTargets;
+    const big=document.createElement("div"); big.className="big"; big.textContent=targets.length; bigWrap.appendChild(big);
     const lbl=document.createElement("div"); lbl.className="biglabel";
-    lbl.textContent = targets.length? "枚が今日の対象です" : "今日の対象はありません";
-    c.appendChild(lbl);
+    lbl.textContent = isInput
+      ? (targets.length? "枚を暗記します" : "暗記対象はありません")
+      : (targets.length? "枚がテスト対象です" : "テスト対象はありません");
+    bigWrap.appendChild(lbl);
     if(targets.length>0){
-      const b1=document.createElement("button"); b1.className="btn"; b1.textContent="暗記する";
-      b1.onclick=()=>startSession("study", targets, trackId); c.appendChild(b1);
-      const b2=document.createElement("button"); b2.className="btn ghost"; b2.textContent="テストする";
-      b2.onclick=()=>startSession("test", targets, trackId); c.appendChild(b2);
+      const b=document.createElement("button"); b.className="btn";
+      b.textContent = isInput ? "暗記を始める" : "テストを始める";
+      b.onclick=()=>startSession(isInput?"study":"test", targets, trackId); bigWrap.appendChild(b);
     }
-    // 先取り: 対象が無くても（または対象があっても）全カードを回せる
+    // 先取り: 全カードを回せる（対象0でも）
     if(allCards.length>0){
-      const b3=document.createElement("button"); b3.className="btn ghost"; b3.textContent=`先取りで全${allCards.length}枚をテスト`;
-      b3.onclick=()=>startSession("test", allCards, trackId); c.appendChild(b3);
+      const b3=document.createElement("button"); b3.className="btn ghost";
+      b3.textContent = `先取りで全${allCards.length}枚を${isInput?"暗記":"テスト"}`;
+      b3.onclick=()=>startSession(isInput?"study":"test", allCards, trackId); bigWrap.appendChild(b3);
     }
-    const info=document.createElement("div"); info.className="dsub"; info.style.marginTop="12px"; info.style.textAlign="center";
-    info.textContent=`このトラックは好きなときに回せます。習得しても定期的に出続けます。全${cardsInTrack(trackId).length}枚。`;
-    c.appendChild(info);
   }
+  setMode(view.mode2);
+
+  const info=document.createElement("div"); info.className="dsub"; info.style.marginTop="12px"; info.style.textAlign="center";
+  const tk=getTrack(trackId);
+  info.textContent=`全${cardsInTrack(trackId).length}枚${tk&&tk.dailyLimit<9999?` ・ 1日上限${tk.dailyLimit}`:""}。好きなときに回せます。`;
+  c.appendChild(info);
   app.appendChild(c);
 }
 
@@ -469,7 +462,7 @@ function renderSession(){
   if(showActions){
     if(!isTest){
       const nx=document.createElement("button"); nx.className="btn"; nx.textContent="覚えた・次へ";
-      nx.onclick=()=>{ markNightDone(c, s.trackId); save(); s.idx++; s.revealed=false; render(); };
+      nx.onclick=()=>{ markStudied(c, s.trackId); save(); s.idx++; s.revealed=false; render(); };
       acts.appendChild(nx);
     }else{
       const ng=document.createElement("button"); ng.className="btn ng"; ng.textContent="できなかった";
@@ -491,8 +484,19 @@ function renderSession(){
   app.appendChild(acts);
 
   const q=document.createElement("div"); q.className="quit";
+  const delc=document.createElement("button"); delc.className="btn ghost sm"; delc.textContent="このカードを削除"; delc.style.marginRight="8px";
+  delc.onclick=()=>confirmModal("このカードを全トラックから完全に削除します。よろしいですか？", ()=>{
+    const cid=c.id;
+    state.cards = state.cards.filter(x=>x.id!==cid);
+    s.cards = s.cards.filter(x=>x.id!==cid);
+    // idxは進めない（次のカードが繰り上がる）。末尾だった場合に備えて調整。
+    if(s.idx>=s.cards.length){ /* 終了画面へ */ }
+    s.revealed=false;
+    save(); render();
+  });
   const qb=document.createElement("button"); qb.className="btn ghost sm"; qb.textContent="中断してホームへ";
-  qb.onclick=()=>{ view.session=null; render(); }; q.appendChild(qb); app.appendChild(q);
+  qb.onclick=()=>{ view.session=null; render(); };
+  q.appendChild(delc); q.appendChild(qb); app.appendChild(q);
 }
 
 function renderSessionEnd(){
@@ -559,12 +563,7 @@ function renderDash(){
     const mastered=cards.filter(x=>(prog(x,t.id).box||1)>=4).length;
     const title=document.createElement("div"); title.className="dtitle"; title.textContent=t.name; c.appendChild(title);
     const sub=document.createElement("div"); sub.className="dsub";
-    let extra;
-    if(t.id==="normal"){
-      extra=`今夜${nightTargets(t.id).length}枚 ・ 朝${morningTargets(t.id).length}枚`;
-    }else{
-      extra=`今日${focusTargets(t.id).length}枚`;
-    }
+    const extra=`暗記${inputTargets(t.id).length}枚 ・ テスト${outputTargets(t.id).length}枚`;
     sub.textContent=`全${cards.length}枚 ・ ${extra} ・ 習得(箱4-5) ${Math.round(mastered/cards.length*100)}%`;
     c.appendChild(sub);
     const boxes=document.createElement("div"); boxes.className="boxes";
@@ -669,90 +668,112 @@ function renderManage(){
   // 個別トラック管理
   const c5=document.createElement("div"); c5.className="card";
   const t5=document.createElement("div"); t5.className="dtitle"; t5.textContent="個別トラック"; c5.appendChild(t5);
-  const sub5=document.createElement("div"); sub5.className="dsub"; sub5.textContent="特定範囲を独立して回す枠。カードは複製(通常に残す)か移動(通常から外す)を選べます。";
+  const sub5=document.createElement("div"); sub5.className="dsub"; sub5.textContent="特定範囲を独立して回す枠。複製(通常に残す)か移動(通常から外す)を選べます。";
   c5.appendChild(sub5);
 
-  // 既存の個別トラック一覧（各トラックにカード追加UIを開けるようにする）
+  // 既存の個別トラック一覧（カード追加／カード編集を開ける）
   for(const t of state.tracks){
     if(t.id==="normal") continue;
     const tr=document.createElement("div"); tr.className="row";
     const nm=document.createElement("label"); nm.style.flex="1"; nm.textContent=`${t.name}（${cardsInTrack(t.id).length}枚・上限${t.dailyLimit>=9999?"なし":t.dailyLimit}）`;
     const addBtn=document.createElement("button"); addBtn.className="btn ghost sm"; addBtn.textContent="カード追加"; addBtn.style.width="auto";
+    const editBtn=document.createElement("button"); editBtn.className="btn ghost sm"; editBtn.textContent="カード編集"; editBtn.style.width="auto";
     const del=document.createElement("button"); del.className="btn ghost sm"; del.textContent="削除"; del.style.width="auto";
     del.onclick=()=>confirmModal(`個別トラック「${t.name}」を削除します。カード本体は残りますが、このトラックの進捗は消えます。`, ()=>{
       state.tracks=state.tracks.filter(x=>x.id!==t.id);
       state.cards.forEach(c=>{ if(c.progress) delete c.progress[t.id]; });
       save(); render();
     });
-    tr.appendChild(nm); tr.appendChild(addBtn); tr.appendChild(del); c5.appendChild(tr);
+    tr.appendChild(nm); tr.appendChild(addBtn); tr.appendChild(editBtn); tr.appendChild(del); c5.appendChild(tr);
 
-    // カード追加パネル（トグル）
-    const panel=document.createElement("div"); panel.style.display="none"; panel.style.margin="6px 0 14px"; panel.style.padding="10px"; panel.style.background="var(--background-primary,#111219)"; panel.style.border="1px solid var(--line)"; panel.style.borderRadius="8px";
-    addBtn.onclick=()=>{ panel.style.display = panel.style.display==="none"?"block":"none"; };
-    // 範囲で追加
-    const pf1=document.createElement("div"); pf1.className="dsub"; pf1.textContent="範囲で追加"; panel.appendChild(pf1);
-    const rowF=document.createElement("div"); rowF.className="row";
-    const subjA=document.createElement("input"); subjA.className="num"; subjA.style.flex="1"; subjA.style.width="auto"; subjA.placeholder="教科(空=全部)";
-    const unitA=document.createElement("input"); unitA.className="num"; unitA.style.flex="1"; unitA.style.width="auto"; unitA.placeholder="単元(空=全部)";
-    rowF.appendChild(subjA); rowF.appendChild(unitA); panel.appendChild(rowF);
-    const modeRow=document.createElement("div"); modeRow.className="seg"; modeRow.style.margin="8px 0";
-    const copyBtn=document.createElement("button"); copyBtn.textContent="複製";
-    const moveBtn=document.createElement("button"); moveBtn.textContent="移動";
-    let addMode="copy";
-    const setMode=(m)=>{ addMode=m; copyBtn.className=m==="copy"?"on":""; moveBtn.className=m==="move"?"on":""; };
-    copyBtn.onclick=()=>setMode("copy"); moveBtn.onclick=()=>setMode("move"); setMode("copy");
-    modeRow.appendChild(copyBtn); modeRow.appendChild(moveBtn); panel.appendChild(modeRow);
+    // --- カード追加パネル ---
+    const panel=document.createElement("div"); panel.style.display="none"; panel.style.margin="6px 0 14px"; panel.style.padding="10px"; panel.style.background="var(--bg)"; panel.style.border="1px solid var(--line)"; panel.style.borderRadius="8px";
+    addBtn.onclick=()=>{ panel.style.display = panel.style.display==="none"?"block":"none"; editPanel.style.display="none"; };
+    const sel={subject:"",unit:"",mode:"copy"};
+    const pf1=document.createElement("div"); pf1.className="dsub"; pf1.textContent="範囲で追加（教科→単元を選択）"; panel.appendChild(pf1);
+    const fieldsWrap=document.createElement("div"); panel.appendChild(fieldsWrap);
+    const drawFields=()=>{
+      fieldsWrap.innerHTML="";
+      makeSelectField(fieldsWrap,"教科",allSubjects(),sel,"subject",()=>{ sel.unit=""; drawFields(); });
+      makeSelectField(fieldsWrap,"単元",unitsInSubject(sel.subject),sel,"unit",()=>drawFields());
+      const modeRow=document.createElement("div"); modeRow.className="seg"; modeRow.style.margin="8px 0";
+      const cp=document.createElement("button"); cp.textContent="複製"; cp.className=sel.mode==="copy"?"on":"";
+      const mv=document.createElement("button"); mv.textContent="移動"; mv.className=sel.mode==="move"?"on":"";
+      cp.onclick=()=>{sel.mode="copy";drawFields();}; mv.onclick=()=>{sel.mode="move";drawFields();};
+      modeRow.appendChild(cp); modeRow.appendChild(mv); fieldsWrap.appendChild(modeRow);
+    };
+    drawFields();
     const amsg=document.createElement("div"); amsg.className="msg";
     const doAdd=document.createElement("button"); doAdd.className="btn sm"; doAdd.textContent="この範囲を追加";
-    doAdd.onclick=()=>{
-      const n=addCardsToTrack(t.id, subjA.value.trim(), unitA.value.trim(), addMode);
-      save(); amsg.textContent=`${n}枚を${addMode==="move"?"移動":"複製"}しました。`; render();
-    };
+    doAdd.onclick=()=>{ const n=addCardsToTrack(t.id, sel.subject, sel.unit, sel.mode); save(); amsg.textContent=`${n}枚を${sel.mode==="move"?"移動":"複製"}しました。`; render(); };
     panel.appendChild(doAdd); panel.appendChild(amsg);
-    // JSON直接投入（このトラック専用）
+    // JSON直接投入
     const pf2=document.createElement("div"); pf2.className="dsub"; pf2.style.marginTop="12px"; pf2.textContent="JSONで直接このトラックに追加（通常には入らない）"; panel.appendChild(pf2);
     const jta=document.createElement("textarea"); jta.rows=4; jta.placeholder='[{"id":"...","front":"...","back":"...","importance":2}, ...]'; panel.appendChild(jta);
     const jmsg=document.createElement("div"); jmsg.className="msg";
     const jbtn=document.createElement("button"); jbtn.className="btn sm"; jbtn.textContent="このトラックにインポート";
-    jbtn.onclick=()=>{
-      let data; try{ data=JSON.parse(jta.value.trim()); }catch{ jmsg.textContent="JSONの形式が不正です。"; return; }
-      const items=Array.isArray(data)?data:[data];
-      let add=0,upd=0;
-      for(const it of items){
-        if(!it.id||it.front==null||it.back==null) continue;
-        const content={ id:it.id, subject:it.subject||"", unit:it.unit||"", type:it.type||"normal",
-          front:it.front, back:it.back, importance:it.importance||2, tags:it.tags||[],
-          figureSVGFront:it.figureSVGFront||null, figureSVGBack:it.figureSVGBack||null };
-        const ex=state.cards.find(x=>x.id===it.id);
-        if(ex){ Object.assign(ex,content); ex.progress=ex.progress||{}; if(!ex.progress[t.id]){ex.progress[t.id]=freshProgress();} upd++; }
-        else{ const nc=Object.assign(content,{progress:{},createdAt:todayStr()}); nc.progress[t.id]=freshProgress(); state.cards.push(nc); add++; }
-      }
-      save(); jmsg.textContent=`追加 ${add} / 更新 ${upd} 件（このトラックのみ）。`; jta.value=""; render();
-    };
+    jbtn.onclick=()=>{ const r=importCardsToTrack(jta.value, t.id); if(r.err){jmsg.textContent=r.err;return;} jmsg.textContent=`追加 ${r.add} / 更新 ${r.upd} 件（このトラックのみ）。`; jta.value=""; render(); };
     panel.appendChild(jbtn); panel.appendChild(jmsg);
     c5.appendChild(panel);
+
+    // --- カード編集パネル（教科/単元で絞ってカードを個別に出し入れ）---
+    const editPanel=document.createElement("div"); editPanel.style.display="none"; editPanel.style.margin="6px 0 14px"; editPanel.style.padding="10px"; editPanel.style.background="var(--bg)"; editPanel.style.border="1px solid var(--line)"; editPanel.style.borderRadius="8px";
+    editBtn.onclick=()=>{ editPanel.style.display = editPanel.style.display==="none"?"block":"none"; panel.style.display="none"; };
+    const esel={subject:"",unit:""};
+    const efWrap=document.createElement("div"); editPanel.appendChild(efWrap);
+    const listWrap=document.createElement("div"); listWrap.style.marginTop="8px";
+    const drawEdit=()=>{
+      efWrap.innerHTML="";
+      makeSelectField(efWrap,"教科",allSubjects(),esel,"subject",()=>{esel.unit="";drawEdit();});
+      makeSelectField(efWrap,"単元",unitsInSubject(esel.subject),esel,"unit",()=>drawEdit());
+      listWrap.innerHTML="";
+      const cards=state.cards.filter(c=>(!esel.subject||c.subject===esel.subject)&&(!esel.unit||c.unit===esel.unit));
+      for(const card of cards){
+        const inTrack = card.progress && card.progress[t.id];
+        const rowc=document.createElement("div"); rowc.style.display="flex"; rowc.style.alignItems="center"; rowc.style.gap="8px"; rowc.style.padding="4px 0"; rowc.style.fontSize="12px";
+        const chk=document.createElement("button"); chk.textContent=inTrack?"✓ 入":"追加"; chk.className="btn ghost sm"; chk.style.width="auto"; chk.style.padding="4px 10px";
+        if(inTrack) chk.style.color="var(--accent)";
+        chk.onclick=()=>{
+          if(card.progress&&card.progress[t.id]){ delete card.progress[t.id]; }
+          else{ card.progress=card.progress||{}; card.progress[t.id]=freshProgress(); }
+          save(); drawEdit();
+        };
+        const lbl=document.createElement("span"); lbl.style.flex="1"; lbl.style.overflow="hidden"; lbl.style.textOverflow="ellipsis"; lbl.style.whiteSpace="nowrap";
+        lbl.textContent=`[${card.subject}/${card.unit}] ${card.front.replace(/[$【】]/g,"").slice(0,20)}`;
+        rowc.appendChild(chk); rowc.appendChild(lbl); listWrap.appendChild(rowc);
+      }
+      if(cards.length===0){ const e=document.createElement("div"); e.className="dsub"; e.textContent="該当カードなし"; listWrap.appendChild(e); }
+    };
+    drawEdit();
+    editPanel.appendChild(listWrap);
+    c5.appendChild(editPanel);
   }
 
-  // 新規作成: 名前＋範囲(subject/unit)＋上限＋複製/移動
+  // 新規作成: 名前＋教科/単元(選択式)＋上限＋複製/移動＋JSONインポート
   const divNew=document.createElement("div"); divNew.className="dsub"; divNew.style.marginTop="10px"; divNew.textContent="新しいトラックを作る"; c5.appendChild(divNew);
   const nrow=document.createElement("div"); nrow.className="row";
   const nameIn=document.createElement("input"); nameIn.className="num"; nameIn.style.flex="1"; nameIn.style.width="auto"; nameIn.placeholder="トラック名（例: 期末）";
   nrow.appendChild(nameIn); c5.appendChild(nrow);
-  const filterRow=document.createElement("div"); filterRow.className="row";
-  const subjIn=document.createElement("input"); subjIn.className="num"; subjIn.style.flex="1"; subjIn.style.width="auto"; subjIn.placeholder="教科（空=全部）";
-  const unitIn=document.createElement("input"); unitIn.className="num"; unitIn.style.flex="1"; unitIn.style.width="auto"; unitIn.placeholder="単元（空=全部）";
-  filterRow.appendChild(subjIn); filterRow.appendChild(unitIn); c5.appendChild(filterRow);
+  const nsel={subject:"",unit:"",mode:"copy"};
+  const nFields=document.createElement("div"); c5.appendChild(nFields);
+  const drawNFields=()=>{
+    nFields.innerHTML="";
+    makeSelectField(nFields,"教科（範囲で入れる場合）",allSubjects(),nsel,"subject",()=>{nsel.unit="";drawNFields();});
+    makeSelectField(nFields,"単元",unitsInSubject(nsel.subject),nsel,"unit",()=>drawNFields());
+    const modeRow=document.createElement("div"); modeRow.className="seg"; modeRow.style.margin="8px 0";
+    const cp=document.createElement("button"); cp.textContent="複製"; cp.className=nsel.mode==="copy"?"on":"";
+    const mv=document.createElement("button"); mv.textContent="移動"; mv.className=nsel.mode==="move"?"on":"";
+    cp.onclick=()=>{nsel.mode="copy";drawNFields();}; mv.onclick=()=>{nsel.mode="move";drawNFields();};
+    modeRow.appendChild(cp); modeRow.appendChild(mv); nFields.appendChild(modeRow);
+  };
+  drawNFields();
   const limitRow=document.createElement("div"); limitRow.className="row";
   const limLb=document.createElement("label"); limLb.textContent="1日の上限（空=なし）";
   const limIn=document.createElement("input"); limIn.className="num"; limIn.type="number"; limIn.min="1"; limIn.placeholder="なし";
   limitRow.appendChild(limLb); limitRow.appendChild(limIn); c5.appendChild(limitRow);
-  const nModeRow=document.createElement("div"); nModeRow.className="seg"; nModeRow.style.margin="8px 0";
-  const nCopy=document.createElement("button"); nCopy.textContent="複製";
-  const nMove=document.createElement("button"); nMove.textContent="移動";
-  let newMode="copy";
-  const setNewMode=(m)=>{ newMode=m; nCopy.className=m==="copy"?"on":""; nMove.className=m==="move"?"on":""; };
-  nCopy.onclick=()=>setNewMode("copy"); nMove.onclick=()=>setNewMode("move"); setNewMode("copy");
-  nModeRow.appendChild(nCopy); nModeRow.appendChild(nMove); c5.appendChild(nModeRow);
+  // トラック作成時のJSONインポート
+  const njLabel=document.createElement("div"); njLabel.className="dsub"; njLabel.style.marginTop="8px"; njLabel.textContent="このトラックに直接入れるJSON（任意）"; c5.appendChild(njLabel);
+  const njta=document.createElement("textarea"); njta.rows=3; njta.placeholder='[{"id":"...","front":"...","back":"...","importance":2}, ...]'; c5.appendChild(njta);
   const cmsg=document.createElement("div"); cmsg.className="msg";
   const cb=document.createElement("button"); cb.className="btn sm"; cb.textContent="このトラックを作成";
   cb.onclick=()=>{
@@ -760,8 +781,11 @@ function renderManage(){
     const id="focus_"+Date.now();
     const limit=parseInt(limIn.value)||9999;
     state.tracks.push({id, name, dailyLimit:limit});
-    const n=addCardsToTrack(id, subjIn.value.trim(), unitIn.value.trim(), newMode);
-    save(); cmsg.textContent=`「${name}」を作成し ${n}枚を${newMode==="move"?"移動":"複製"}しました。`; render();
+    let msg="";
+    const n=addCardsToTrack(id, nsel.subject, nsel.unit, nsel.mode);
+    msg += `範囲から ${n}枚を${nsel.mode==="move"?"移動":"複製"}。`;
+    if(njta.value.trim()){ const r=importCardsToTrack(njta.value, id); if(r.err){ cmsg.textContent=`トラック作成。ただしJSON: ${r.err}`; save(); render(); return; } msg += ` JSON追加 ${r.add}/更新 ${r.upd}。`; }
+    save(); cmsg.textContent=`「${name}」を作成。${msg}`; render();
   };
   c5.appendChild(cb); c5.appendChild(cmsg); app.appendChild(c5);
 
@@ -791,8 +815,25 @@ function renderManage(){
 
 function freshProgress(){ return { box:1, dueDate:todayStr(), phase:"new", history:[] }; }
 
+// 選択式フィールド: ラベル＋候補チップ（「全部」＋各値）。選択値をstateオブジェクトに保持。
+// stateObj[key] に選択値（""=全部）。onChangeで再描画用コールバック。
+function makeSelectField(parent, label, options, stateObj, key, onChange){
+  const wrap=document.createElement("div"); wrap.className="selfield";
+  const lb=document.createElement("div"); lb.className="selfield-label"; lb.textContent=label; wrap.appendChild(lb);
+  const chips=document.createElement("div"); chips.className="selfield-chips";
+  const mk=(val,text,isAll)=>{
+    const b=document.createElement("button"); b.className="selchip"+(isAll?" all":"")+((stateObj[key]||"")===val?" on":"");
+    b.textContent=text;
+    b.onclick=()=>{ stateObj[key]=val; if(onChange)onChange(); };
+    chips.appendChild(b);
+  };
+  mk("","全部",true);
+  for(const o of options) mk(o,o,false);
+  wrap.appendChild(chips); parent.appendChild(wrap);
+  return wrap;
+}
+
 // カードを指定トラックに入れる。mode="copy"は通常を残す、mode="move"は通常から外す。
-// 範囲(subject/unit)でフィルタ。追加枚数を返す。
 function addCardsToTrack(trackId, subjFilter, unitFilter, mode){
   let n=0;
   for(const c of state.cards){
@@ -803,6 +844,32 @@ function addCardsToTrack(trackId, subjFilter, unitFilter, mode){
     if(mode==="move" && trackId!=="normal"){ delete c.progress["normal"]; }
   }
   return n;
+}
+// 既存カードの教科一覧
+function allSubjects(){
+  return [...new Set(state.cards.map(c=>c.subject).filter(Boolean))].sort();
+}
+// JSON文字列をパースし、各カードを指定トラックに入れる。{add,upd,err}を返す。
+function importCardsToTrack(jsonText, trackId){
+  let data;
+  try{ data=JSON.parse(String(jsonText||"").trim()); }catch{ return {add:0,upd:0,err:"JSONの形式が不正です。"}; }
+  const items=Array.isArray(data)?data:(data&&data.cards?data.cards:[data]);
+  let add=0,upd=0;
+  for(const it of items){
+    if(!it||!it.id||it.front==null||it.back==null) continue;
+    const content={ id:it.id, subject:it.subject||"", unit:it.unit||"", type:it.type||"normal",
+      front:it.front, back:it.back, importance:it.importance||2, tags:it.tags||[],
+      figureSVGFront:it.figureSVGFront||null, figureSVGBack:it.figureSVGBack||null };
+    const ex=state.cards.find(x=>x.id===it.id);
+    if(ex){ Object.assign(ex,content); ex.progress=ex.progress||{}; if(!ex.progress[trackId]){ex.progress[trackId]=freshProgress();} upd++; }
+    else{ const nc=Object.assign(content,{progress:{},createdAt:todayStr()}); nc.progress[trackId]=freshProgress(); state.cards.push(nc); add++; }
+  }
+  save();
+  return {add,upd,err:null};
+}
+// 指定教科内の単元一覧（教科空なら全単元）
+function unitsInSubject(subject){
+  return [...new Set(state.cards.filter(c=>!subject||c.subject===subject).map(c=>c.unit).filter(Boolean))].sort();
 }
 
 // initial render (KaTeX may load slightly after; re-render on load)
