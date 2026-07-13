@@ -686,6 +686,14 @@ function renderManage(){
     });
     tr.appendChild(nm); tr.appendChild(addBtn); tr.appendChild(editBtn); tr.appendChild(del); c5.appendChild(tr);
 
+    // 表示枚数（日次上限）の変更
+    const limRow=document.createElement("div"); limRow.className="row"; limRow.style.marginTop="0";
+    const limLbl=document.createElement("label"); limLbl.textContent="1日の表示枚数";
+    const limInp=document.createElement("input"); limInp.className="num"; limInp.type="number"; limInp.min="1"; limInp.placeholder="なし";
+    limInp.value = t.dailyLimit>=9999 ? "" : t.dailyLimit;
+    limInp.onchange=()=>{ const v=parseInt(limInp.value); t.dailyLimit = (v&&v>0)? v : 9999; save(); render(); };
+    limRow.appendChild(limLbl); limRow.appendChild(limInp); c5.appendChild(limRow);
+
     // --- カード追加パネル ---
     const panel=document.createElement("div"); panel.style.display="none"; panel.style.margin="6px 0 14px"; panel.style.padding="10px"; panel.style.background="var(--bg)"; panel.style.border="1px solid var(--line)"; panel.style.borderRadius="8px";
     addBtn.onclick=()=>{ panel.style.display = panel.style.display==="none"?"block":"none"; editPanel.style.display="none"; };
