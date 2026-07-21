@@ -114,9 +114,47 @@
 const LS_KEY = "memorize_v1";
 const DEFAULTS = { cards:[], tracks:[{id:"normal", name:"通常", dailyLimit:25}], settings:{}, meta:{} };
 
+/* SEED-START （管理タブ「サイト用データを書き出す」で生成した1行で、下のconst SEED行を置き換える） */
+const SEED = { version: 0, tracks: [], cards: [] };
+/* SEED-END */
+
 function load(){
-  try{ const raw = localStorage.getItem(LS_KEY); if(raw) return migrate(JSON.parse(raw)); }catch(e){}
-  return JSON.parse(JSON.stringify(DEFAULTS));
+  let s;
+  try{ const raw = localStorage.getItem(LS_KEY); if(raw) s = migrate(JSON.parse(raw)); }catch(e){}
+  if(!s) s = JSON.parse(JSON.stringify(DEFAULTS));
+  return applySeed(s);
+}
+
+// index.htmlに焼き込まれたSEEDカードを取り込む。localStorageの進捗は保持し、
+// SEED.versionが上がったときだけ新規/更新カードを反映する（同一端末で二重取り込みしない）。
+function applySeed(s){
+  s.meta = s.meta || {};
+  if(!SEED || !SEED.cards || (s.meta.seedVersion||0) >= (SEED.version||0)) return s;
+  for(const td of (SEED.tracks||[])){
+    if(!td.id || td.id==="normal") continue;
+    const ex = s.tracks.find(t=>t.id===td.id);
+    if(ex){ if(td.name)ex.name=td.name; if(td.dailyLimit!=null)ex.dailyLimit=td.dailyLimit; }
+    else s.tracks.push({id:td.id, name:td.name||td.id, dailyLimit:td.dailyLimit||9999});
+  }
+  for(const sc of SEED.cards){
+    if(!sc.id || sc.front==null || sc.back==null) continue;
+    const memberTracks = (sc.tracks && sc.tracks.length) ? sc.tracks : ["normal"];
+    const content = { id:sc.id, subject:sc.subject||"", unit:sc.unit||"", type:sc.type||"normal",
+      front:sc.front, back:sc.back, importance:sc.importance||2, tags:sc.tags||[],
+      figureSVGFront:sc.figureSVGFront||null, figureSVGBack:sc.figureSVGBack||null };
+    const ex = s.cards.find(x=>x.id===sc.id);
+    if(ex){
+      const prog = ex.progress||{};              // 既存の進捗を保持
+      Object.assign(ex, content); ex.progress = prog;
+      for(const tid of memberTracks){ if(!ex.progress[tid]) ex.progress[tid]=freshProgress(); }
+    }else{
+      const nc = Object.assign(content, {progress:{}, createdAt:todayStr()});
+      for(const tid of memberTracks){ nc.progress[tid]=freshProgress(); }
+      s.cards.push(nc);
+    }
+  }
+  s.meta.seedVersion = SEED.version;
+  return s;
 }
 function save(){ localStorage.setItem(LS_KEY, JSON.stringify(state)); }
 
@@ -143,6 +181,7 @@ function migrate(s){
   return s;
 }
 let state = load();
+save(); // seed取り込み・旧形式移行の結果を保存
 
 // トラック補助
 function getTrack(id){ return state.tracks.find(t=>t.id===id); }
@@ -664,6 +703,38 @@ function renderManage(){
     save(); msg.textContent=`追加 ${add} / 更新 ${upd} 件。`+(trackDefs.length?` トラック ${trackDefs.length} 件。`:""); ta.value="";
   };
   c2.appendChild(ib); c2.appendChild(msg); app.appendChild(c2);
+
+  // サイトに焼き込む（index.htmlのSEEDを生成）
+  const cs=document.createElement("div"); cs.className="card";
+  const ts=document.createElement("div"); ts.className="dtitle"; ts.textContent="サイトに焼き込む"; cs.appendChild(ts);
+  const subs=document.createElement("div"); subs.className="dsub"; subs.style.lineHeight="1.7";
+  subs.innerHTML="今あるカードを index.html に埋め込む用のコードを生成します。生成したコードで index.html の <code>/* SEED-START */</code>〜<code>/* SEED-END */</code> の間の <code>const SEED = ...</code> 行を置き換えてコミットすると、どの端末で開いても最初からカードが入った状態になります（進捗は各端末に残ります）。";
+  cs.appendChild(subs);
+  const sbtn=document.createElement("button"); sbtn.className="btn sm"; sbtn.textContent="サイト用データを書き出す";
+  const smsg=document.createElement("div"); smsg.className="msg";
+  const sta=document.createElement("textarea"); sta.rows=4; sta.readOnly=true; sta.style.display="none"; sta.style.marginTop="8px";
+  sbtn.onclick=async()=>{
+    const base=Math.max((SEED&&SEED.version)||0, (state.meta&&state.meta.seedVersion)||0);
+    const seed={
+      version: base+1,
+      tracks: state.tracks.filter(t=>t.id!=="normal").map(t=>({id:t.id, name:t.name, dailyLimit:t.dailyLimit})),
+      cards: state.cards.map(c=>{
+        const o={ id:c.id, subject:c.subject||"", unit:c.unit||"", type:c.type||"normal",
+          front:c.front, back:c.back, importance:c.importance||2, tags:c.tags||[],
+          tracks:Object.keys(c.progress||{}) };
+        if(c.figureSVGFront) o.figureSVGFront=c.figureSVGFront;
+        if(c.figureSVGBack) o.figureSVGBack=c.figureSVGBack;
+        return o;
+      })
+    };
+    const code="const SEED = "+JSON.stringify(seed)+";";
+    sta.value=code; sta.style.display="block";
+    let ok=false;
+    try{ if(navigator.clipboard&&window.isSecureContext){ await navigator.clipboard.writeText(code); ok=true; } }catch{}
+    if(!ok){ sta.focus(); sta.select(); try{ok=document.execCommand("copy");}catch{} }
+    smsg.textContent=(ok?"コピーしました。":"下の欄を手動でコピーしてください。")+` カード${seed.cards.length}枚・v${seed.version}。`;
+  };
+  cs.appendChild(sbtn); cs.appendChild(smsg); cs.appendChild(sta); app.appendChild(cs);
 
   // 個別トラック管理
   const c5=document.createElement("div"); c5.className="card";
